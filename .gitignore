@@ -1,0 +1,23 @@
+# Recordings and logs
+recordings/*.mp4
+logs/*.log
+logs/*.log.*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Working files
+*.png
+*.rtf
