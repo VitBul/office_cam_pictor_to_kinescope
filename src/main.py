@@ -38,8 +38,9 @@ def check_disk_space(config: dict, min_free_gb: float = 2.0) -> bool:
     Returns:
         True if free space >= min_free_gb, False otherwise.
     """
-    output_dir = config["recording"]["output_dir"]
-    usage = shutil.disk_usage(output_dir)
+    output_dir = Path(config["recording"]["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    usage = shutil.disk_usage(str(output_dir))
     free_gb = usage.free / (1024 ** 3)
 
     if free_gb < min_free_gb:
