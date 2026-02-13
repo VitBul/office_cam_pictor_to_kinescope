@@ -13,7 +13,7 @@ schtasks /delete /tn "CamKinescope_ShutdownNotify" /f >nul 2>&1
 
 REM Task 1: Auto-start on logon (30s delay for network)
 echo Creating auto-start task...
-schtasks /create /tn "CamKinescope_AutoStart" /sc onlogon /delay 0000:30 /tr "cmd /c cd /d \"%CD%\" && python src\main.py" /f
+schtasks /create /tn "CamKinescope_AutoStart" /sc onlogon /delay 0000:30 /tr "\"%CD%\run.bat\"" /f
 if errorlevel 1 (
     echo [ERROR] Failed to create auto-start task. Run as Administrator!
     pause

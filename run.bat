@@ -1,17 +1,6 @@
 @echo off
 chcp 65001 >nul 2>&1
-
-echo ========================================
-echo  CamKinescope - Starting...
-echo ========================================
-echo.
-
 cd /d %~dp0
 
-python src/main.py
-if errorlevel 1 (
-    echo.
-    echo [ERROR] Application exited with an error.
-)
-
-pause
+REM Launch CamKinescope minimized in background, this window closes immediately
+start "CamKinescope" /min python src\main.py
