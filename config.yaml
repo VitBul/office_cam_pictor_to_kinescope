@@ -2,8 +2,7 @@
 # RTSP camera capture and Kinescope upload automation
 
 camera:
-  rtsp_url: "rtsp://user:pass@10.0.0.103:554/cam/realmonitor?channel=1&subtype=1"
-  rtsp_transport: "tcp"
+  rtsp_url: "rtsp://admin:Mrobot_007@10.0.0.103:554"
 
 recording:
   duration_seconds: 3600
@@ -18,6 +17,9 @@ kinescope:
 telegram:
   bot_token: "YOUR_BOT_TOKEN"
   chat_id: "YOUR_CHAT_ID"
+
+vlc:
+  path: "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe"
 
 ffmpeg:
   path: "ffmpeg"

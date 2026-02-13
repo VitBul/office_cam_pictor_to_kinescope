@@ -1,9 +1,13 @@
-"""RTSP video capture via FFmpeg for the CamKinescope project.
+"""RTSP video capture via VLC + FFmpeg remux for CamKinescope.
 
-Records segments from an RTSP camera stream, generates Kinescope-friendly
-titles, and manages local file retention.
+VLC captures the RTSP stream to .ts (transport stream) file.
+FFmpeg remuxes .ts to .mp4 (fast copy, no re-encoding).
+This two-step approach is needed because FFmpeg cannot connect
+to this camera's non-standard RTSP implementation directly.
 """
 
+import os
+import signal
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -16,14 +20,6 @@ logger = setup_logger(__name__)
 
 
 def load_config(config_path: str) -> dict:
-    """Load and return the YAML configuration file.
-
-    Args:
-        config_path: Absolute or relative path to config.yaml.
-
-    Returns:
-        Parsed configuration dictionary.
-    """
     path = Path(config_path)
     with open(path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
@@ -32,127 +28,123 @@ def load_config(config_path: str) -> dict:
 
 
 def record_segment(config: dict, duration_override: int = None) -> str:
-    """Record a single video segment from the RTSP camera via FFmpeg.
-
-    Args:
-        config: Parsed config dictionary (from config.yaml).
-        duration_override: If provided, overrides duration_seconds from config.
+    """Record a video segment: VLC captures RTSP to .ts, FFmpeg remuxes to .mp4.
 
     Returns:
         Full path to the created MP4 file on success, or None on failure.
     """
     rtsp_url = config["camera"]["rtsp_url"]
-    rtsp_transport = config["camera"].get("rtsp_transport", "tcp")
     duration = duration_override or config["recording"]["duration_seconds"]
     output_dir = Path(config["recording"]["output_dir"])
+    vlc_path = config.get("vlc", {}).get("path", "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe")
     ffmpeg_path = config.get("ffmpeg", {}).get("path", "ffmpeg")
 
-    # Create output directory if it doesn't exist
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate filename from current datetime: dd.mm.yyyy HH_MM.mp4
     now = datetime.now()
-    filename = now.strftime("%d.%m.%Y %H_%M") + ".mp4"
-    output_path = output_dir / filename
+    base_name = now.strftime("%d.%m.%Y %H_%M")
+    ts_path = output_dir / (base_name + ".ts")
+    mp4_path = output_dir / (base_name + ".mp4")
 
-    cmd = [
-        ffmpeg_path,
-        "-y",
-        "-rtsp_transport", rtsp_transport,
-        "-timeout", "5000000",      # 5s connection timeout (microseconds)
-        "-stimeout", "5000000",     # 5s socket timeout (microseconds)
-        "-i", rtsp_url,
-        "-c", "copy",
-        "-t", str(duration),
-        "-f", "mp4",
-        "-movflags", "+faststart",
-        str(output_path),
+    # Step 1: VLC captures RTSP → .ts
+    vlc_cmd = [
+        vlc_path,
+        "-I", "dummy",
+        "--play-and-exit",
+        rtsp_url,
+        f"--sout=#file{{dst={ts_path}}}",
     ]
 
-    # Wall-clock timeout: duration + 5 min buffer for network delays
-    wall_timeout = duration + 300
-
     logger.info(
-        "Recording started: url=%s duration=%ds timeout=%ds output=%s",
-        rtsp_url,
-        duration,
-        wall_timeout,
-        output_path,
+        "VLC recording started: url=%s duration=%ds output=%s",
+        rtsp_url, duration, ts_path,
     )
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=wall_timeout)
+        process = subprocess.Popen(
+            vlc_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Wait for the recording duration, then terminate VLC
+        process.wait(timeout=duration)
+        logger.warning("VLC exited early (code %d) before duration elapsed", process.returncode)
     except subprocess.TimeoutExpired:
-        logger.error("Recording timed out after %ds (wall-clock), killing FFmpeg", wall_timeout)
-        # File may be partially written but still usable
-        if output_path.exists() and output_path.stat().st_size > 0:
-            logger.warning("Partial file exists (%d bytes), keeping it: %s", output_path.stat().st_size, output_path)
-            return str(output_path)
+        # Expected: VLC records until we kill it
+        process.terminate()
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        logger.info("VLC recording stopped after %ds", duration)
+
+    # Check .ts file was created
+    if not ts_path.exists() or ts_path.stat().st_size == 0:
+        logger.error("VLC produced no output file: %s", ts_path)
+        if ts_path.exists():
+            ts_path.unlink()
         return None
 
-    if result.returncode == 0:
-        logger.info("Recording finished successfully: %s", output_path)
-        return str(output_path)
+    ts_size_mb = ts_path.stat().st_size / (1024 * 1024)
+    logger.info("VLC recording saved: %s (%.1f MB)", ts_path, ts_size_mb)
 
-    logger.error(
-        "Recording failed (exit code %d): %s",
-        result.returncode,
-        result.stderr[-500:] if result.stderr else "no stderr",
-    )
-    # FFmpeg may return non-zero but still produce usable file
-    if output_path.exists() and output_path.stat().st_size > 0:
-        logger.warning("File exists despite error (%d bytes), keeping it: %s", output_path.stat().st_size, output_path)
-        return str(output_path)
-    return None
+    # Step 2: FFmpeg remuxes .ts → .mp4 (fast copy, no re-encoding)
+    remux_cmd = [
+        ffmpeg_path, "-y",
+        "-i", str(ts_path),
+        "-c", "copy",
+        "-movflags", "+faststart",
+        str(mp4_path),
+    ]
+
+    logger.info("Remuxing to MP4: %s → %s", ts_path.name, mp4_path.name)
+
+    try:
+        result = subprocess.run(remux_cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        logger.error("Remux timed out after 300s")
+        # Keep .ts as fallback
+        return str(ts_path)
+
+    if result.returncode != 0:
+        logger.error("Remux failed (exit code %d): %s", result.returncode,
+                      result.stderr[-500:] if result.stderr else "no stderr")
+        # Keep .ts as fallback
+        return str(ts_path)
+
+    # Remove .ts after successful remux
+    ts_path.unlink()
+    mp4_size_mb = mp4_path.stat().st_size / (1024 * 1024)
+    logger.info("Remux complete: %s (%.1f MB)", mp4_path, mp4_size_mb)
+
+    return str(mp4_path)
 
 
 def get_kinescope_title(filepath: str) -> str:
-    """Derive a Kinescope upload title from the recording filename.
-
-    Extracts the filename without extension and replaces underscores with
-    colons so the timestamp reads naturally.
-
-    Example:
-        "13.02.2026 14_00.mp4"  ->  "13.02.2026 14:00"
-
-    Args:
-        filepath: Path to the MP4 file.
-
-    Returns:
-        Human-readable title string.
-    """
     stem = Path(filepath).stem
     title = stem.replace("_", ":")
     return title
 
 
 def cleanup_old_recordings(config: dict) -> None:
-    """Delete the oldest local recordings when count exceeds the limit.
-
-    Args:
-        config: Parsed config dictionary (from config.yaml).
-    """
     output_dir = Path(config["recording"]["output_dir"])
     max_files = config["recording"]["max_local_files"]
 
     if not output_dir.exists():
-        logger.info("Output directory does not exist, nothing to clean up")
         return
 
-    # List MP4 files sorted by modification time (oldest first)
-    mp4_files = sorted(
-        output_dir.glob("*.mp4"),
+    # Clean both .mp4 and .ts files
+    media_files = sorted(
+        list(output_dir.glob("*.mp4")) + list(output_dir.glob("*.ts")),
         key=lambda p: p.stat().st_mtime,
     )
 
-    files_to_delete = len(mp4_files) - max_files
+    files_to_delete = len(media_files) - max_files
     if files_to_delete <= 0:
-        logger.info(
-            "No cleanup needed: %d files, max %d", len(mp4_files), max_files
-        )
         return
 
-    for old_file in mp4_files[:files_to_delete]:
+    for old_file in media_files[:files_to_delete]:
         old_file.unlink()
         logger.info("Deleted old recording: %s", old_file)
 
