@@ -59,6 +59,8 @@ def record_segment(config: dict, duration_override: int = None) -> str:
         ffmpeg_path,
         "-y",
         "-rtsp_transport", rtsp_transport,
+        "-timeout", "5000000",      # 5s connection timeout (microseconds)
+        "-stimeout", "5000000",     # 5s socket timeout (microseconds)
         "-i", rtsp_url,
         "-c", "copy",
         "-t", str(duration),
@@ -67,14 +69,26 @@ def record_segment(config: dict, duration_override: int = None) -> str:
         str(output_path),
     ]
 
+    # Wall-clock timeout: duration + 5 min buffer for network delays
+    wall_timeout = duration + 300
+
     logger.info(
-        "Recording started: url=%s duration=%ds output=%s",
+        "Recording started: url=%s duration=%ds timeout=%ds output=%s",
         rtsp_url,
         duration,
+        wall_timeout,
         output_path,
     )
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=wall_timeout)
+    except subprocess.TimeoutExpired:
+        logger.error("Recording timed out after %ds (wall-clock), killing FFmpeg", wall_timeout)
+        # File may be partially written but still usable
+        if output_path.exists() and output_path.stat().st_size > 0:
+            logger.warning("Partial file exists (%d bytes), keeping it: %s", output_path.stat().st_size, output_path)
+            return str(output_path)
+        return None
 
     if result.returncode == 0:
         logger.info("Recording finished successfully: %s", output_path)
@@ -83,8 +97,12 @@ def record_segment(config: dict, duration_override: int = None) -> str:
     logger.error(
         "Recording failed (exit code %d): %s",
         result.returncode,
-        result.stderr,
+        result.stderr[-500:] if result.stderr else "no stderr",
     )
+    # FFmpeg may return non-zero but still produce usable file
+    if output_path.exists() and output_path.stat().st_size > 0:
+        logger.warning("File exists despite error (%d bytes), keeping it: %s", output_path.stat().st_size, output_path)
+        return str(output_path)
     return None
 
 
