@@ -25,36 +25,37 @@ echo.
 REM Task 2: Shutdown notification via XML (event trigger)
 echo Creating shutdown notification task...
 
-(
-echo ^<?xml version="1.0" encoding="UTF-16"?^>
-echo ^<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"^>
-echo   ^<Triggers^>
-echo     ^<EventTrigger^>
-echo       ^<Subscription^>&lt;QueryList&gt;&lt;Query Id="0"&gt;&lt;Select Path="System"&gt;*[System[Provider[@Name='User32'] and EventID=1074]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;^</Subscription^>
-echo     ^</EventTrigger^>
-echo   ^</Triggers^>
-echo   ^<Actions Context="Author"^>
-echo     ^<Exec^>
-echo       ^<Command^>python^</Command^>
-echo       ^<Arguments^>src\shutdown_notify.py^</Arguments^>
-echo       ^<WorkingDirectory^>%CD%^</WorkingDirectory^>
-echo     ^</Exec^>
-echo   ^</Actions^>
-echo   ^<Settings^>
-echo     ^<ExecutionTimeLimit^>PT30S^</ExecutionTimeLimit^>
-echo     ^<DisallowStartIfOnBatteries^>false^</DisallowStartIfOnBatteries^>
-echo   ^</Settings^>
-echo ^</Task^>
-) > "%TEMP%\camkinescope_shutdown.xml"
+set "XML_FILE=%TEMP%\camkinescope_shutdown.xml"
 
-schtasks /create /tn "CamKinescope_ShutdownNotify" /xml "%TEMP%\camkinescope_shutdown.xml" /f
+REM Write XML file line by line to avoid CMD escaping issues with & in XML entities
+echo ^<?xml version="1.0"?^> > "%XML_FILE%"
+echo ^<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"^> >> "%XML_FILE%"
+echo   ^<Triggers^> >> "%XML_FILE%"
+echo     ^<EventTrigger^> >> "%XML_FILE%"
+echo       ^<Subscription^>^&lt;QueryList^&gt;^&lt;Query Id="0"^&gt;^&lt;Select Path="System"^&gt;*[System[Provider[@Name='User32'] and EventID=1074]]^&lt;/Select^&gt;^&lt;/Query^&gt;^&lt;/QueryList^&gt;^</Subscription^> >> "%XML_FILE%"
+echo     ^</EventTrigger^> >> "%XML_FILE%"
+echo   ^</Triggers^> >> "%XML_FILE%"
+echo   ^<Actions Context="Author"^> >> "%XML_FILE%"
+echo     ^<Exec^> >> "%XML_FILE%"
+echo       ^<Command^>python^</Command^> >> "%XML_FILE%"
+echo       ^<Arguments^>src\shutdown_notify.py^</Arguments^> >> "%XML_FILE%"
+echo       ^<WorkingDirectory^>%CD%^</WorkingDirectory^> >> "%XML_FILE%"
+echo     ^</Exec^> >> "%XML_FILE%"
+echo   ^</Actions^> >> "%XML_FILE%"
+echo   ^<Settings^> >> "%XML_FILE%"
+echo     ^<ExecutionTimeLimit^>PT30S^</ExecutionTimeLimit^> >> "%XML_FILE%"
+echo     ^<DisallowStartIfOnBatteries^>false^</DisallowStartIfOnBatteries^> >> "%XML_FILE%"
+echo   ^</Settings^> >> "%XML_FILE%"
+echo ^</Task^> >> "%XML_FILE%"
+
+schtasks /create /tn "CamKinescope_ShutdownNotify" /xml "%XML_FILE%" /f
 if errorlevel 1 (
     echo [ERROR] Failed to create shutdown task. Run as Administrator!
-    del "%TEMP%\camkinescope_shutdown.xml" >nul 2>&1
+    del "%XML_FILE%" >nul 2>&1
     pause
     exit /b 1
 )
-del "%TEMP%\camkinescope_shutdown.xml" >nul 2>&1
+del "%XML_FILE%" >nul 2>&1
 echo [OK] Shutdown notification task created.
 echo.
 
