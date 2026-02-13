@@ -20,9 +20,10 @@ telegram:
 
 network:
   known_devices:
-    - "10.0.0.1"    # Router
-    - "10.0.0.101"  # PC
-    - "10.0.0.103"  # Camera
+    - "10.0.0.1"    # Router (Yota 4G)
+    - "10.0.0.101"  # PC (DESKTOP-A4BIMSL)
+    - "10.0.0.103"  # Camera (V Pictor)
+    - "10.0.0.126"  # Printer (NPI29D136)
   subnet_prefix: "10.0.0"
   check_interval_seconds: 300  # Check every 5 min when paused
 
