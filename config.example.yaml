@@ -23,3 +23,4 @@ vlc:
 
 ffmpeg:
   path: "ffmpeg"
+  target_bitrate: "1024k"  # ~45 MB/hour

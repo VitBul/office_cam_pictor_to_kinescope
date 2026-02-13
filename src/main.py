@@ -2,6 +2,7 @@
 
 Runs an infinite loop: record RTSP segment -> upload in background -> repeat.
 Upload runs in a separate thread so recording continues without gaps.
+On startup, uploads any leftover .mp4 files from previous sessions.
 """
 
 import sys
@@ -25,6 +26,10 @@ from logger_setup import setup_logger
 
 logger = setup_logger("main")
 
+# Track files currently being uploaded to avoid double-uploads
+_uploading_files = set()
+_uploading_lock = threading.Lock()
+
 
 def check_disk_space(config: dict, min_free_gb: float = 2.0) -> bool:
     output_dir = Path(config["recording"]["output_dir"])
@@ -43,7 +48,7 @@ def upload_in_background(filepath: str, title: str, config: dict) -> None:
     """Upload a file to Kinescope in a background thread.
 
     On success: sends notification with play_link and deletes local file.
-    On failure: sends error notification and keeps local file.
+    On failure: sends error notification and keeps local file for retry.
     """
     try:
         logger.info("Background upload started: %s", filepath)
@@ -56,12 +61,49 @@ def upload_in_background(filepath: str, title: str, config: dict) -> None:
         error_details = traceback.format_exc()
         logger.error("Background upload failed:\n%s", error_details)
         notify_error("загрузка", error_details, config)
+    finally:
+        with _uploading_lock:
+            _uploading_files.discard(filepath)
 
-    # Cleanup after upload
     try:
         cleanup_old_recordings(config)
     except Exception:
         logger.error("Cleanup failed: %s", traceback.format_exc())
+
+
+def start_upload(filepath: str, config: dict) -> None:
+    """Start a background upload thread for a file, if not already uploading."""
+    with _uploading_lock:
+        if filepath in _uploading_files:
+            logger.info("Already uploading, skipping: %s", filepath)
+            return
+        _uploading_files.add(filepath)
+
+    title = get_kinescope_title(filepath)
+    upload_thread = threading.Thread(
+        target=upload_in_background,
+        args=(filepath, title, config),
+        daemon=True,
+    )
+    upload_thread.start()
+    logger.info("Upload thread started for: %s", filepath)
+
+
+def upload_pending_files(config: dict) -> None:
+    """Upload any .mp4 files left in recordings from previous sessions."""
+    output_dir = Path(config["recording"]["output_dir"])
+    if not output_dir.exists():
+        return
+
+    pending = sorted(output_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime)
+    if not pending:
+        return
+
+    logger.info("Found %d pending file(s) to upload", len(pending))
+    send_telegram(f"\U0001f4e4 Найдено {len(pending)} незагруженных файлов, начинаю загрузку", config)
+
+    for mp4_file in pending:
+        start_upload(str(mp4_file), config)
 
 
 def main() -> None:
@@ -70,6 +112,9 @@ def main() -> None:
 
     send_telegram("\U0001f680 CamKinescope запущен", config)
     logger.info("CamKinescope started, entering main loop")
+
+    # Upload leftover files from previous sessions
+    upload_pending_files(config)
 
     while True:
         try:
@@ -94,15 +139,8 @@ def main() -> None:
                 time.sleep(10)
                 continue
 
-            # Start upload in background thread — next recording starts immediately
-            title = get_kinescope_title(filepath)
-            upload_thread = threading.Thread(
-                target=upload_in_background,
-                args=(filepath, title, config),
-                daemon=True,
-            )
-            upload_thread.start()
-            logger.info("Upload thread started for %s, beginning next recording", filepath)
+            # Start upload in background — next recording starts immediately
+            start_upload(filepath, config)
 
         except KeyboardInterrupt:
             logger.info("Stopped by user (KeyboardInterrupt)")
