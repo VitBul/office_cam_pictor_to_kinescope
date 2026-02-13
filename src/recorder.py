@@ -133,7 +133,13 @@ def get_kinescope_title(filepath: str) -> str:
     return title
 
 
-def cleanup_old_recordings(config: dict) -> None:
+def cleanup_old_recordings(config: dict, skip_files: set = None) -> None:
+    """Delete oldest recordings when file count exceeds max_local_files.
+
+    Args:
+        config: Application config dict.
+        skip_files: Set of absolute file path strings to skip (e.g. files being uploaded).
+    """
     output_dir = Path(config["recording"]["output_dir"])
     max_files = config["recording"]["max_local_files"]
 
@@ -150,11 +156,21 @@ def cleanup_old_recordings(config: dict) -> None:
     if files_to_delete <= 0:
         return
 
+    skip = skip_files or set()
+    deleted = 0
     for old_file in media_files[:files_to_delete]:
-        old_file.unlink()
-        logger.info("Deleted old recording: %s", old_file)
+        if str(old_file.resolve()) in skip or str(old_file) in skip:
+            logger.info("Skipping file in use: %s", old_file)
+            continue
+        try:
+            old_file.unlink()
+            deleted += 1
+            logger.info("Deleted old recording: %s", old_file)
+        except PermissionError:
+            logger.warning("Cannot delete (file in use): %s", old_file)
 
-    logger.info("Cleanup complete: removed %d file(s)", files_to_delete)
+    if deleted:
+        logger.info("Cleanup complete: removed %d file(s)", deleted)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,24 @@
 - [ ] Запустить `autostart.bat` от администратора на ПК
 - [ ] Настройка BIOS: "Restore on AC Power Loss = Power On"
 
+## Batch 4: Системный трей + баг-фиксы
+
+### Баг-фиксы
+- [ ] BUG-1: Telegram chat_id — пользователь обновляет в config.yaml на `-1003769841378`
+- [x] BUG-2: main.py — последовательные загрузки (queue.Queue + upload_worker)
+- [x] BUG-3: recorder.py — cleanup_old_recordings(skip_files) + PermissionError catch
+- [x] BUG-4: main.py — wait_for_free_network один раз в upload_worker, не в каждом потоке
+- [x] main.py — wait_for_internet() блокирует загрузку до появления сети
+- [x] main.py — stop_event для корректного завершения из трея
+
+### Системный трей
+- [x] Создать `src/tray.py` — pystray + Pillow, иконка камеры, меню: Логи/Выход
+- [x] Обновить `requirements.txt` — pystray, Pillow
+- [x] Обновить `run.bat` — `pythonw src\tray.py` (без CMD-окна)
+- [x] autostart.bat — без изменений (уже вызывает run.bat)
+- [ ] Деплой + проверка пользователем
+- [ ] Коммит в git
+
 ## Оптимизация
 - [ ] Переключить на субпоток камеры (~100 МБ/час вместо 612 МБ)
 

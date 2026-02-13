@@ -1,18 +1,24 @@
 """Main orchestrator for CamKinescope.
 
-Runs an infinite loop: record RTSP segment -> upload in background -> repeat.
-Upload runs in a separate thread so recording continues without gaps.
-On startup, uploads any leftover .mp4 files from previous sessions.
-Before uploading, checks network for extra devices — pauses if busy.
+Runs an infinite loop: record RTSP segment -> queue for upload -> repeat.
+A single upload worker thread processes files one at a time (sequential).
+On startup, queues any leftover .mp4 files from previous sessions.
+Before each upload, checks internet connectivity and network for extra devices.
+
+Recording and transcoding work without internet (local LAN only).
+Uploads start automatically when internet becomes available.
 """
 
 import sys
 import time
+import queue
 import shutil
 import threading
 import traceback
 from datetime import datetime
 from pathlib import Path
+
+import requests
 
 from recorder import load_config, record_segment, get_kinescope_title, cleanup_old_recordings
 from uploader import upload_to_kinescope
@@ -28,7 +34,10 @@ from logger_setup import setup_logger
 
 logger = setup_logger("main")
 
-# Track files currently being uploaded to avoid double-uploads
+# Upload queue: files processed one at a time by upload_worker
+_upload_queue = queue.Queue()
+
+# Track file currently being uploaded — used by cleanup to skip it
 _uploading_files = set()
 _uploading_lock = threading.Lock()
 
@@ -46,90 +55,142 @@ def check_disk_space(config: dict, min_free_gb: float = 2.0) -> bool:
     return True
 
 
-def wait_for_free_network(config: dict) -> None:
-    """Block until no extra devices are detected on the network.
+def wait_for_internet(stop_event: threading.Event = None) -> bool:
+    """Block until internet is reachable (Kinescope endpoint responds).
 
-    Checks every check_interval_seconds (default 5 min).
-    Sends Telegram notification when pausing and resuming.
+    Returns True when connected, False if stop_event is set.
+    """
+    while True:
+        if stop_event and stop_event.is_set():
+            return False
+        try:
+            requests.head("https://uploader.kinescope.io", timeout=10)
+            return True
+        except (requests.ConnectionError, requests.Timeout, requests.RequestException):
+            logger.info("No internet connection, retrying in 60s")
+            for _ in range(12):  # 60s in 5s increments to respond to stop_event
+                if stop_event and stop_event.is_set():
+                    return False
+                time.sleep(5)
+
+
+def wait_for_free_network(config: dict, stop_event: threading.Event = None) -> bool:
+    """Block until no extra devices are detected on the local network.
+
+    Returns True when network is free, False if stop_event is set.
     """
     if not config.get("network", {}).get("known_devices"):
-        return  # Network monitoring not configured, skip
+        return True  # Network monitoring not configured
 
     check_interval = config.get("network", {}).get("check_interval_seconds", 300)
     notified_paused = False
 
     while True:
+        if stop_event and stop_event.is_set():
+            return False
+
         extra = check_extra_devices(config)
 
         if not extra:
             if notified_paused:
-                send_telegram("\u25b6\ufe0f Сеть свободна, загрузка возобновлена", config)
+                send_telegram("▶️ Сеть свободна, загрузка возобновлена", config)
                 logger.info("Network clear, resuming upload")
-            return
+            return True
 
         if not notified_paused:
             devices_str = ", ".join(extra)
             send_telegram(
-                f"\u23f8 Загрузка на паузе: обнаружены доп. устройства в сети ({len(extra)}): {devices_str}",
+                f"⏸ Загрузка на паузе: доп. устройства в сети ({len(extra)}): {devices_str}",
                 config,
             )
             notified_paused = True
 
         logger.info("Extra devices on network (%d), waiting %ds: %s", len(extra), check_interval, extra)
-        time.sleep(check_interval)
+        for _ in range(check_interval // 5):
+            if stop_event and stop_event.is_set():
+                return False
+            time.sleep(5)
 
 
-def upload_in_background(filepath: str, title: str, config: dict) -> None:
-    """Upload a file to Kinescope in a background thread.
-
-    Waits for network to be free before uploading.
-    On success: sends notification with play_link and deletes local file.
-    On failure: sends error notification and keeps local file for retry.
-    """
-    try:
-        # Wait until extra devices leave the network
-        wait_for_free_network(config)
-
-        logger.info("Background upload started: %s", filepath)
-        result = upload_to_kinescope(filepath, title, config)
-        play_link = result.get("play_link") if result else None
-        notify_upload_complete(title, config, play_link=play_link)
-        Path(filepath).unlink()
-        logger.info("Local file deleted after successful upload: %s", filepath)
-    except Exception:
-        error_details = traceback.format_exc()
-        logger.error("Background upload failed:\n%s", error_details)
-        notify_error("загрузка", error_details, config)
-    finally:
-        with _uploading_lock:
-            _uploading_files.discard(filepath)
-
-    try:
-        cleanup_old_recordings(config)
-    except Exception:
-        logger.error("Cleanup failed: %s", traceback.format_exc())
-
-
-def start_upload(filepath: str, config: dict) -> None:
-    """Start a background upload thread for a file, if not already uploading."""
+def _get_uploading_files() -> set:
+    """Return set of file paths currently being uploaded."""
     with _uploading_lock:
-        if filepath in _uploading_files:
-            logger.info("Already uploading, skipping: %s", filepath)
-            return
-        _uploading_files.add(filepath)
-
-    title = get_kinescope_title(filepath)
-    upload_thread = threading.Thread(
-        target=upload_in_background,
-        args=(filepath, title, config),
-        daemon=True,
-    )
-    upload_thread.start()
-    logger.info("Upload thread started for: %s", filepath)
+        return set(_uploading_files)
 
 
-def upload_pending_files(config: dict) -> None:
-    """Upload any .mp4 files left in recordings from previous sessions."""
+def upload_worker(config: dict, stop_event: threading.Event = None) -> None:
+    """Worker thread: processes upload queue one file at a time.
+
+    Fixes:
+    - BUG-2: Sequential uploads (single worker, queue-based).
+    - BUG-4: wait_for_free_network called once per upload, not per thread.
+    - BUG-3: Passes skip_files to cleanup_old_recordings.
+    - Offline resilience: wait_for_internet blocks until connection is available.
+    """
+    while True:
+        if stop_event and stop_event.is_set():
+            break
+
+        # Get next file from queue (blocks up to 10s then re-checks stop_event)
+        try:
+            filepath = _upload_queue.get(timeout=10)
+        except queue.Empty:
+            continue
+
+        # Verify file still exists
+        if not Path(filepath).exists():
+            logger.warning("File no longer exists, skipping: %s", filepath)
+            continue
+
+        with _uploading_lock:
+            _uploading_files.add(filepath)
+
+        title = get_kinescope_title(filepath)
+
+        try:
+            # 1. Wait for internet connectivity
+            if not wait_for_internet(stop_event):
+                _upload_queue.put(filepath)  # Re-queue before exit
+                break
+
+            # 2. Wait for free network (no extra devices on 4G)
+            if not wait_for_free_network(config, stop_event):
+                _upload_queue.put(filepath)
+                break
+
+            # 3. Upload
+            logger.info("Upload started: %s", filepath)
+            result = upload_to_kinescope(filepath, title, config)
+            play_link = result.get("play_link") if result else None
+            notify_upload_complete(title, config, play_link=play_link)
+            Path(filepath).unlink()
+            logger.info("Upload complete, file deleted: %s", filepath)
+
+        except Exception:
+            error_details = traceback.format_exc()
+            logger.error("Upload failed: %s\n%s", filepath, error_details)
+            notify_error("загрузка", error_details, config)
+            # Re-queue for retry after 60s delay
+            _upload_queue.put(filepath)
+            for _ in range(12):
+                if stop_event and stop_event.is_set():
+                    break
+                time.sleep(5)
+
+        finally:
+            with _uploading_lock:
+                _uploading_files.discard(filepath)
+
+        # Cleanup old recordings, skip files being uploaded
+        try:
+            skip = _get_uploading_files()
+            cleanup_old_recordings(config, skip_files=skip)
+        except Exception:
+            logger.error("Cleanup failed: %s", traceback.format_exc())
+
+
+def enqueue_pending_files(config: dict) -> None:
+    """Find and queue any .mp4 files left from previous sessions."""
     output_dir = Path(config["recording"]["output_dir"])
     if not output_dir.exists():
         return
@@ -139,28 +200,43 @@ def upload_pending_files(config: dict) -> None:
         return
 
     logger.info("Found %d pending file(s) to upload", len(pending))
-    send_telegram(f"\U0001f4e4 Найдено {len(pending)} незагруженных файлов, начинаю загрузку", config)
+    send_telegram(f"📤 Найдено {len(pending)} незагруженных файлов, начинаю загрузку", config)
 
     for mp4_file in pending:
-        start_upload(str(mp4_file), config)
+        _upload_queue.put(str(mp4_file))
 
 
-def main() -> None:
+def enqueue_upload(filepath: str) -> None:
+    """Add a file to the upload queue."""
+    _upload_queue.put(filepath)
+    logger.info("File queued for upload: %s", filepath)
+
+
+def main(stop_event: threading.Event = None) -> None:
     config_path = Path(__file__).parent.parent / "config.yaml"
     config = load_config(str(config_path))
 
-    send_telegram("\U0001f680 CamKinescope запущен", config)
+    send_telegram("🚀 CamKinescope запущен", config)
     logger.info("CamKinescope started, entering main loop")
 
-    # Upload leftover files from previous sessions
-    upload_pending_files(config)
+    # Start single upload worker thread (sequential uploads)
+    worker = threading.Thread(
+        target=upload_worker,
+        args=(config, stop_event),
+        daemon=True,
+    )
+    worker.start()
 
-    while True:
+    # Queue leftover files from previous sessions
+    enqueue_pending_files(config)
+
+    while not (stop_event and stop_event.is_set()):
         try:
             # Disk space check
             if not check_disk_space(config):
                 logger.info("Disk space low, running cleanup")
-                cleanup_old_recordings(config)
+                skip = _get_uploading_files()
+                cleanup_old_recordings(config, skip_files=skip)
                 if not check_disk_space(config):
                     logger.error("Disk space still insufficient, waiting 60s")
                     time.sleep(60)
@@ -171,6 +247,7 @@ def main() -> None:
             notify_recording_started(filename, config)
 
             # Record segment (blocks for duration_seconds)
+            # Recording works on local LAN — no internet required
             filepath = record_segment(config)
 
             if filepath is None:
@@ -178,12 +255,13 @@ def main() -> None:
                 time.sleep(10)
                 continue
 
-            # Start upload in background — next recording starts immediately
-            start_upload(filepath, config)
+            # Queue for upload — next recording starts immediately
+            # Upload worker will wait for internet if needed
+            enqueue_upload(filepath)
 
         except KeyboardInterrupt:
             logger.info("Stopped by user (KeyboardInterrupt)")
-            send_telegram("\u23f9 CamKinescope остановлен", config)
+            send_telegram("⏹ CamKinescope остановлен", config)
             break
         except Exception:
             error_details = traceback.format_exc()
@@ -191,6 +269,10 @@ def main() -> None:
             notify_error("критическая", error_details, config)
             logger.info("Sleeping 60 seconds before retry")
             time.sleep(60)
+
+    if stop_event and stop_event.is_set():
+        logger.info("Stop event received, shutting down")
+        send_telegram("⏹ CamKinescope остановлен", config)
 
 
 if __name__ == "__main__":
