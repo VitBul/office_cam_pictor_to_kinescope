@@ -3,6 +3,7 @@
 Runs an infinite loop: record RTSP segment -> upload in background -> repeat.
 Upload runs in a separate thread so recording continues without gaps.
 On startup, uploads any leftover .mp4 files from previous sessions.
+Before uploading, checks network for extra devices — pauses if busy.
 """
 
 import sys
@@ -15,6 +16,7 @@ from pathlib import Path
 
 from recorder import load_config, record_segment, get_kinescope_title, cleanup_old_recordings
 from uploader import upload_to_kinescope
+from network_monitor import check_extra_devices
 from notifier import (
     notify_recording_started,
     notify_upload_complete,
@@ -44,13 +46,50 @@ def check_disk_space(config: dict, min_free_gb: float = 2.0) -> bool:
     return True
 
 
+def wait_for_free_network(config: dict) -> None:
+    """Block until no extra devices are detected on the network.
+
+    Checks every check_interval_seconds (default 5 min).
+    Sends Telegram notification when pausing and resuming.
+    """
+    if not config.get("network", {}).get("known_devices"):
+        return  # Network monitoring not configured, skip
+
+    check_interval = config.get("network", {}).get("check_interval_seconds", 300)
+    notified_paused = False
+
+    while True:
+        extra = check_extra_devices(config)
+
+        if not extra:
+            if notified_paused:
+                send_telegram("\u25b6\ufe0f Сеть свободна, загрузка возобновлена", config)
+                logger.info("Network clear, resuming upload")
+            return
+
+        if not notified_paused:
+            devices_str = ", ".join(extra)
+            send_telegram(
+                f"\u23f8 Загрузка на паузе: обнаружены доп. устройства в сети ({len(extra)}): {devices_str}",
+                config,
+            )
+            notified_paused = True
+
+        logger.info("Extra devices on network (%d), waiting %ds: %s", len(extra), check_interval, extra)
+        time.sleep(check_interval)
+
+
 def upload_in_background(filepath: str, title: str, config: dict) -> None:
     """Upload a file to Kinescope in a background thread.
 
+    Waits for network to be free before uploading.
     On success: sends notification with play_link and deletes local file.
     On failure: sends error notification and keeps local file for retry.
     """
     try:
+        # Wait until extra devices leave the network
+        wait_for_free_network(config)
+
         logger.info("Background upload started: %s", filepath)
         result = upload_to_kinescope(filepath, title, config)
         play_link = result.get("play_link") if result else None
