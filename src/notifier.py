@@ -90,9 +90,12 @@ def notify_recording_started(filename: str, config: dict) -> bool:
     return send_telegram(f"\U0001f3a5 Запись начата: {filename}", config)
 
 
-def notify_upload_complete(filename: str, config: dict) -> bool:
-    """Notify that a file has been uploaded to Kinescope."""
-    return send_telegram(f"\u2705 Загружено в Kinescope: {filename}", config)
+def notify_upload_complete(title: str, config: dict, play_link: str = None) -> bool:
+    """Notify that a file has been uploaded to Kinescope, with play link if available."""
+    msg = f"\u2705 Загружено в Kinescope: {title}"
+    if play_link:
+        msg += f"\n\U0001f517 {play_link}"
+    return send_telegram(msg, config)
 
 
 def notify_error(error_type: str, details: str, config: dict) -> bool:

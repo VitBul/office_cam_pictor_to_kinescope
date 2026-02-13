@@ -92,7 +92,7 @@ def run_cycle(config: dict) -> None:
     title = get_kinescope_title(filepath)
 
     try:
-        upload_to_kinescope(filepath, title, config)
+        result = upload_to_kinescope(filepath, title, config)
     except Exception:
         error_details = traceback.format_exc()
         logger.error("Upload failed:\n%s", error_details)
@@ -100,7 +100,8 @@ def run_cycle(config: dict) -> None:
         # Keep the local file so it can be retried later
     else:
         # Upload succeeded - notify and remove local copy
-        notify_upload_complete(Path(filepath).name, config)
+        play_link = result.get("play_link") if result else None
+        notify_upload_complete(title, config, play_link=play_link)
         Path(filepath).unlink()
         logger.info("Local file deleted after successful upload: %s", filepath)
 
