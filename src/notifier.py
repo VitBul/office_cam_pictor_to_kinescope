@@ -55,6 +55,32 @@ def send_telegram(message: str, config: dict) -> bool:
         return False
 
 
+def send_telegram_plain(message: str, config: dict) -> bool:
+    """Send a plain-text message (no HTML parsing) to avoid issues with tracebacks."""
+    bot_token = config["telegram"]["bot_token"]
+    chat_id = config["telegram"]["chat_id"]
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+
+    try:
+        response = requests.post(
+            url,
+            json={"chat_id": chat_id, "text": message},
+            timeout=30,
+        )
+        if response.ok:
+            logger.info("Telegram notification sent successfully")
+            return True
+        logger.error(
+            "Telegram API returned status %s: %s",
+            response.status_code,
+            response.text,
+        )
+        return False
+    except requests.RequestException as exc:
+        logger.error("Failed to send Telegram notification: %s", exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Convenience notification helpers
 # ---------------------------------------------------------------------------
@@ -70,8 +96,12 @@ def notify_upload_complete(filename: str, config: dict) -> bool:
 
 
 def notify_error(error_type: str, details: str, config: dict) -> bool:
-    """Notify about an error."""
-    return send_telegram(f"\u274c Ошибка ({error_type}): {details}", config)
+    """Notify about an error (plain text, no HTML to avoid parse issues with tracebacks)."""
+    # Truncate long tracebacks to fit Telegram message limit
+    if len(details) > 500:
+        details = details[:500] + "..."
+    msg = f"\u274c Ошибка ({error_type}): {details}"
+    return send_telegram_plain(msg, config)
 
 
 def notify_disk_space(free_gb: float, config: dict) -> bool:

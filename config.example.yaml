@@ -1,18 +1,18 @@
 # CamKinescope Configuration
-# RTSP camera capture and Kinescope upload automation
+# Copy this file to config.yaml and fill in your values
 
 camera:
-  rtsp_url: "rtsp://admin:Mrobot_007@10.0.0.103:554"
+  rtsp_url: "rtsp://user:pass@10.0.0.103:554"
 
 recording:
   duration_seconds: 3600
   output_dir: "./recordings"
-  filename_format: "{date}_{time}"  # dd.mm.yyyy HH_MM
+  filename_format: "{date}_{time}"
   max_local_files: 5
 
 kinescope:
-  api_key: "YOUR_API_KEY"
-  upload_url: "https://upload.new.video"
+  api_key: "YOUR_KINESCOPE_API_KEY"
+  parent_id: "YOUR_PROJECT_OR_FOLDER_ID"
 
 telegram:
   bot_token: "YOUR_BOT_TOKEN"

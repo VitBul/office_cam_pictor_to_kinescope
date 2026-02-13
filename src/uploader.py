@@ -1,7 +1,8 @@
-"""Kinescope video upload module for the CamKinescope project.
+"""Kinescope video upload module for CamKinescope.
 
-Uploads local MP4 recordings to the Kinescope API and provides a
-standalone CLI entry point for manual uploads.
+Uses Kinescope Uploader API v2 (Method 2: Single Request Upload).
+Endpoint: POST https://uploader.kinescope.io/v2/video
+Auth: Bearer token in header.
 """
 
 import sys
@@ -14,45 +15,44 @@ from logger_setup import setup_logger
 
 logger = setup_logger(__name__)
 
+KINESCOPE_UPLOAD_URL = "https://uploader.kinescope.io/v2/video"
+
 
 def upload_to_kinescope(filepath: str, title: str, config: dict) -> dict:
-    """Upload an MP4 video file to the Kinescope platform.
+    """Upload an MP4 video file to Kinescope.
 
-    Args:
-        filepath: Absolute or relative path to the MP4 file.
-        title: Title that will appear in Kinescope.
-        config: Parsed config dictionary (from config.yaml).
+    Uses single-request upload: sends the raw video binary in the request body
+    with metadata in headers.
 
     Returns:
         Parsed JSON response from the Kinescope API.
-
     Raises:
         requests.HTTPError: If the API returns a non-2xx status code.
-        FileNotFoundError: If the specified file does not exist.
     """
     api_key = config["kinescope"]["api_key"]
-    upload_url = config["kinescope"].get(
-        "upload_url", "https://upload.new.video"
-    )
+    parent_id = config["kinescope"]["parent_id"]
 
     path = Path(filepath)
-    filename = path.name
     file_size_mb = path.stat().st_size / (1024 * 1024)
 
     logger.info(
         "Upload started: file=%s size=%.2f MB title=%s",
-        filepath,
-        file_size_mb,
-        title,
+        filepath, file_size_mb, title,
     )
 
-    with open(path, "rb") as file_handle:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "X-Parent-ID": parent_id,
+        "X-Video-Title": title,
+        "Content-Type": "video/mp4",
+    }
+
+    with open(path, "rb") as f:
         response = requests.post(
-            upload_url,
-            auth=(api_key, ""),
-            files={"video": (filename, file_handle, "video/mp4")},
-            data={"title": title},
-            timeout=7200,  # 2 hours max for large files
+            KINESCOPE_UPLOAD_URL,
+            headers=headers,
+            data=f,
+            timeout=7200,
         )
 
     response.raise_for_status()
@@ -60,8 +60,7 @@ def upload_to_kinescope(filepath: str, title: str, config: dict) -> dict:
     result = response.json()
     logger.info(
         "Upload succeeded: status=%d response=%s",
-        response.status_code,
-        str(result)[:200],
+        response.status_code, str(result)[:200],
     )
     return result
 
@@ -74,8 +73,8 @@ if __name__ == "__main__":
     video_path = sys.argv[1]
     config_path = Path(__file__).parent.parent / "config.yaml"
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+    with open(config_path, "r", encoding="utf-8") as fh:
+        cfg = yaml.safe_load(fh)
 
     video_title = Path(video_path).stem.replace("_", ":")
     result = upload_to_kinescope(video_path, video_title, cfg)
