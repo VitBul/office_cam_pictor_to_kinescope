@@ -182,20 +182,24 @@ def upload_worker(config: dict, stop_event: threading.Event = None, pause_event:
         if filepath not in retry_state:
             retry_state[filepath] = {"count": 0, "error_msg_ids": []}
 
+        requeued = False
         try:
             # Check pause before upload
             if pause_event and not wait_while_paused(pause_event, stop_event, config):
                 _upload_queue.put(filepath)
+                requeued = True
                 break
 
             # 1. Wait for internet connectivity
             if not wait_for_internet(stop_event):
                 _upload_queue.put(filepath)
+                requeued = True
                 break
 
             # 2. Wait for free network (no extra devices on 4G)
             if not wait_for_free_network(config, stop_event):
                 _upload_queue.put(filepath)
+                requeued = True
                 break
 
             # 3. Upload to Kinescope
@@ -224,11 +228,12 @@ def upload_worker(config: dict, stop_event: threading.Event = None, pause_event:
                             max_retries, filepath)
                 _handle_telegram_fallback(filepath, title, retry_state, config)
             else:
-                # Notify error and re-queue
+                # Notify error and re-queue — keep file protected from cleanup
                 error_msg_id = notify_error("загрузка", error_details, config)
                 if error_msg_id:
                     retry_state[filepath]["error_msg_ids"].append(error_msg_id)
                 _upload_queue.put(filepath)
+                requeued = True
                 # Wait 60s before retry
                 for _ in range(12):
                     if stop_event and stop_event.is_set():
@@ -236,8 +241,10 @@ def upload_worker(config: dict, stop_event: threading.Event = None, pause_event:
                     time.sleep(5)
 
         finally:
-            with _uploading_lock:
-                _uploading_files.discard(filepath)
+            # Only remove from uploading set if file was NOT re-queued for retry
+            if not requeued:
+                with _uploading_lock:
+                    _uploading_files.discard(filepath)
 
         # Cleanup old recordings, skip files being uploaded
         try:
