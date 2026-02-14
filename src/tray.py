@@ -2,7 +2,7 @@
 
 Creates a tray icon using pystray + Pillow.
 Runs main() in a background daemon thread.
-Context menu: Open logs, Exit.
+Context menu: Pause/Resume, Open logs, Exit.
 """
 
 import os
@@ -21,12 +21,18 @@ from logger_setup import setup_logger
 
 logger = setup_logger("tray")
 
-# Shared stop event — signals main loop and upload worker to shut down
+# Shared events — signal main loop and upload worker
 _stop_event = threading.Event()
+_pause_event = threading.Event()
 
 
-def create_camera_icon(size: int = 64) -> Image.Image:
-    """Draw a simple camera icon using Pillow."""
+def create_camera_icon(size: int = 64, paused: bool = False) -> Image.Image:
+    """Draw a simple camera icon using Pillow.
+
+    Args:
+        size: Icon size in pixels.
+        paused: If True, draw yellow dot instead of red (pause indicator).
+    """
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
@@ -65,13 +71,14 @@ def create_camera_icon(size: int = 64) -> Image.Image:
         outline="#1565C0",
     )
 
-    # Recording indicator (red dot)
+    # Status indicator dot: red = recording, yellow = paused
+    dot_color = "#FFC107" if paused else "#F44336"
     dot_r = int(size * 0.06)
     dot_x = int(size * 0.85)
     dot_y = int(size * 0.18)
     draw.ellipse(
         [dot_x - dot_r, dot_y - dot_r, dot_x + dot_r, dot_y + dot_r],
-        fill="#F44336",
+        fill=dot_color,
     )
 
     return img
@@ -89,6 +96,21 @@ def open_logs():
         subprocess.Popen(["open", str(log_dir)])
 
 
+def toggle_pause(icon):
+    """Toggle pause state and update icon."""
+    if _pause_event.is_set():
+        _pause_event.clear()
+        logger.info("Resumed from tray menu")
+        icon.icon = create_camera_icon(paused=False)
+    else:
+        _pause_event.set()
+        logger.info("Paused from tray menu")
+        icon.icon = create_camera_icon(paused=True)
+
+    # Force menu update
+    icon.update_menu()
+
+
 def on_exit(icon):
     """Handle Exit menu click: stop main loop, remove tray icon."""
     logger.info("Exit requested from tray menu")
@@ -98,9 +120,13 @@ def on_exit(icon):
 
 def run_tray():
     """Create and run the system tray icon."""
-    icon_image = create_camera_icon()
+    icon_image = create_camera_icon(paused=False)
 
     menu = pystray.Menu(
+        pystray.MenuItem(
+            lambda item: "Возобновить" if _pause_event.is_set() else "Пауза",
+            lambda icon, item: toggle_pause(icon),
+        ),
         pystray.MenuItem("Открыть логи", lambda: open_logs()),
         pystray.MenuItem("Выход", on_exit),
     )
@@ -112,8 +138,12 @@ def run_tray():
         menu=menu,
     )
 
-    # Run main() in a background daemon thread
-    main_thread = threading.Thread(target=main, args=(_stop_event,), daemon=True)
+    # Run main() in a background daemon thread, passing both events
+    main_thread = threading.Thread(
+        target=main,
+        args=(_stop_event, _pause_event),
+        daemon=True,
+    )
     main_thread.start()
     logger.info("Main loop started in background thread")
 

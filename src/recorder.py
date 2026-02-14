@@ -1,7 +1,7 @@
-"""RTSP video capture via VLC + FFmpeg transcode for CamKinescope.
+"""RTSP video capture via VLC + FFmpeg remux for CamKinescope.
 
 VLC captures the RTSP stream to .ts (transport stream) file.
-FFmpeg transcodes .ts to .mp4 (re-encodes to target bitrate).
+FFmpeg remuxes .ts to .mp4 (stream copy, no re-encoding).
 This two-step approach is needed because FFmpeg cannot connect
 to this camera's non-standard RTSP implementation directly.
 """
@@ -89,40 +89,35 @@ def record_segment(config: dict, duration_override: int = None) -> str:
     ts_size_mb = ts_path.stat().st_size / (1024 * 1024)
     logger.info("VLC recording saved: %s (%.1f MB)", ts_path, ts_size_mb)
 
-    # Step 2: FFmpeg transcodes .ts → .mp4 (re-encode to target bitrate)
-    target_bitrate = config.get("ffmpeg", {}).get("target_bitrate", "1024k")
-
-    transcode_cmd = [
+    # Step 2: FFmpeg remuxes .ts → .mp4 (stream copy, no re-encoding)
+    remux_cmd = [
         ffmpeg_path, "-y",
         "-i", str(ts_path),
-        "-c:v", "libx264",
-        "-b:v", target_bitrate,
-        "-preset", "fast",
+        "-c", "copy",
         "-an",
         "-movflags", "+faststart",
         str(mp4_path),
     ]
 
-    logger.info("Transcoding to MP4: %s → %s (bitrate=%s)", ts_path.name, mp4_path.name, target_bitrate)
+    logger.info("Remuxing to MP4: %s → %s", ts_path.name, mp4_path.name)
 
-    # Transcoding 1hr video takes ~5-15 min depending on CPU
-    transcode_timeout = 1800  # 30 min max
+    remux_timeout = 60  # remux is near-instant
 
     try:
-        result = subprocess.run(transcode_cmd, capture_output=True, text=True, timeout=transcode_timeout)
+        result = subprocess.run(remux_cmd, capture_output=True, text=True, timeout=remux_timeout)
     except subprocess.TimeoutExpired:
-        logger.error("Transcode timed out after %ds", transcode_timeout)
+        logger.error("Remux timed out after %ds", remux_timeout)
         return str(ts_path)
 
     if result.returncode != 0:
-        logger.error("Transcode failed (exit code %d): %s", result.returncode,
+        logger.error("Remux failed (exit code %d): %s", result.returncode,
                       result.stderr[-500:] if result.stderr else "no stderr")
         return str(ts_path)
 
-    # Remove .ts after successful transcode
+    # Remove .ts after successful remux
     ts_path.unlink()
     mp4_size_mb = mp4_path.stat().st_size / (1024 * 1024)
-    logger.info("Transcode complete: %s (%.1f MB)", mp4_path, mp4_size_mb)
+    logger.info("Remux complete: %s (%.1f MB)", mp4_path, mp4_size_mb)
 
     return str(mp4_path)
 

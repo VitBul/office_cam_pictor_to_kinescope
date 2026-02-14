@@ -17,6 +17,7 @@ kinescope:
 telegram:
   bot_token: "YOUR_BOT_TOKEN"
   chat_id: "YOUR_CHAT_ID"
+  api_base_url: "http://localhost:8081"  # Local Bot API Server (up to 2 GB uploads)
 
 network:
   known_devices:
@@ -32,4 +33,3 @@ vlc:
 
 ffmpeg:
   path: "ffmpeg"
-  target_bitrate: "1024k"  # ~45 MB/hour

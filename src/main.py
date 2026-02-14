@@ -5,8 +5,9 @@ A single upload worker thread processes files one at a time (sequential).
 On startup, queues any leftover .mp4 files from previous sessions.
 Before each upload, checks internet connectivity and network for extra devices.
 
-Recording and transcoding work without internet (local LAN only).
+Recording and remuxing work without internet (local LAN only).
 Uploads start automatically when internet becomes available.
+If Kinescope upload fails after max retries, falls back to Telegram upload.
 """
 
 import sys
@@ -29,6 +30,8 @@ from notifier import (
     notify_error,
     notify_disk_space,
     send_telegram,
+    send_video_to_telegram,
+    delete_telegram_message,
 )
 from logger_setup import setup_logger
 
@@ -112,23 +115,50 @@ def wait_for_free_network(config: dict, stop_event: threading.Event = None) -> b
             time.sleep(5)
 
 
+def wait_while_paused(pause_event: threading.Event, stop_event: threading.Event, config: dict) -> bool:
+    """Block while pause_event is set. Returns False if stop_event fires during pause."""
+    if not pause_event.is_set():
+        return True
+
+    send_telegram("⏸ Пауза", config)
+    logger.info("Paused by user")
+
+    while pause_event.is_set():
+        if stop_event and stop_event.is_set():
+            return False
+        time.sleep(5)
+
+    # Resumed
+    send_telegram("▶️ Возобновлено, проверяю очереди...", config)
+    logger.info("Resumed by user")
+    pending = _upload_queue.qsize()
+    if pending:
+        send_telegram(f"📤 В очереди на загрузку: {pending} файлов", config)
+
+    return True
+
+
 def _get_uploading_files() -> set:
     """Return set of file paths currently being uploaded."""
     with _uploading_lock:
         return set(_uploading_files)
 
 
-def upload_worker(config: dict, stop_event: threading.Event = None) -> None:
+def upload_worker(config: dict, stop_event: threading.Event = None, pause_event: threading.Event = None) -> None:
     """Worker thread: processes upload queue one file at a time.
 
-    Fixes:
-    - BUG-2: Sequential uploads (single worker, queue-based).
-    - BUG-4: wait_for_free_network called once per upload, not per thread.
-    - BUG-3: Passes skip_files to cleanup_old_recordings.
-    - Offline resilience: wait_for_internet blocks until connection is available.
+    After max_upload_retries failed Kinescope uploads, falls back to Telegram upload.
     """
+    max_retries = config.get("kinescope", {}).get("max_upload_retries", 3)
+    # Per-file retry counter: filepath -> {"count": int, "error_msg_ids": [int]}
+    retry_state = {}
+
     while True:
         if stop_event and stop_event.is_set():
+            break
+
+        # Check pause
+        if pause_event and not wait_while_paused(pause_event, stop_event, config):
             break
 
         # Get next file from queue (blocks up to 10s then re-checks stop_event)
@@ -140,6 +170,7 @@ def upload_worker(config: dict, stop_event: threading.Event = None) -> None:
         # Verify file still exists
         if not Path(filepath).exists():
             logger.warning("File no longer exists, skipping: %s", filepath)
+            retry_state.pop(filepath, None)
             continue
 
         with _uploading_lock:
@@ -147,10 +178,19 @@ def upload_worker(config: dict, stop_event: threading.Event = None) -> None:
 
         title = get_kinescope_title(filepath)
 
+        # Initialize retry state for this file
+        if filepath not in retry_state:
+            retry_state[filepath] = {"count": 0, "error_msg_ids": []}
+
         try:
+            # Check pause before upload
+            if pause_event and not wait_while_paused(pause_event, stop_event, config):
+                _upload_queue.put(filepath)
+                break
+
             # 1. Wait for internet connectivity
             if not wait_for_internet(stop_event):
-                _upload_queue.put(filepath)  # Re-queue before exit
+                _upload_queue.put(filepath)
                 break
 
             # 2. Wait for free network (no extra devices on 4G)
@@ -158,24 +198,42 @@ def upload_worker(config: dict, stop_event: threading.Event = None) -> None:
                 _upload_queue.put(filepath)
                 break
 
-            # 3. Upload
-            logger.info("Upload started: %s", filepath)
+            # 3. Upload to Kinescope
+            logger.info("Upload started: %s (attempt %d/%d)",
+                        filepath, retry_state[filepath]["count"] + 1, max_retries)
             result = upload_to_kinescope(filepath, title, config)
             play_link = result.get("play_link") if result else None
             notify_upload_complete(title, config, play_link=play_link)
+
+            # Success — delete error messages and cleanup
+            _delete_error_messages(retry_state[filepath]["error_msg_ids"], config)
+            retry_state.pop(filepath, None)
             Path(filepath).unlink()
             logger.info("Upload complete, file deleted: %s", filepath)
 
         except Exception:
             error_details = traceback.format_exc()
             logger.error("Upload failed: %s\n%s", filepath, error_details)
-            notify_error("загрузка", error_details, config)
-            # Re-queue for retry after 60s delay
-            _upload_queue.put(filepath)
-            for _ in range(12):
-                if stop_event and stop_event.is_set():
-                    break
-                time.sleep(5)
+
+            retry_state[filepath]["count"] += 1
+            current_count = retry_state[filepath]["count"]
+
+            if current_count >= max_retries:
+                # Kinescope exhausted — try Telegram fallback
+                logger.info("Max retries (%d) reached for %s, trying Telegram fallback",
+                            max_retries, filepath)
+                _handle_telegram_fallback(filepath, title, retry_state, config)
+            else:
+                # Notify error and re-queue
+                error_msg_id = notify_error("загрузка", error_details, config)
+                if error_msg_id:
+                    retry_state[filepath]["error_msg_ids"].append(error_msg_id)
+                _upload_queue.put(filepath)
+                # Wait 60s before retry
+                for _ in range(12):
+                    if stop_event and stop_event.is_set():
+                        break
+                    time.sleep(5)
 
         finally:
             with _uploading_lock:
@@ -187,6 +245,45 @@ def upload_worker(config: dict, stop_event: threading.Event = None) -> None:
             cleanup_old_recordings(config, skip_files=skip)
         except Exception:
             logger.error("Cleanup failed: %s", traceback.format_exc())
+
+
+def _handle_telegram_fallback(filepath: str, title: str, retry_state: dict, config: dict) -> None:
+    """Try uploading video to Telegram as fallback. Clean up error messages on success."""
+    tg_result = send_video_to_telegram(filepath, title, config)
+
+    if tg_result and tg_result.get("message_id"):
+        # Telegram upload succeeded
+        logger.info("Telegram fallback succeeded for %s", filepath)
+        send_telegram(f"📹 Загружено в Telegram (фоллбэк): {title}", config)
+
+        # Delete previous error messages
+        _delete_error_messages(retry_state[filepath]["error_msg_ids"], config)
+        retry_state.pop(filepath, None)
+
+        # Delete local file
+        try:
+            Path(filepath).unlink()
+            logger.info("File deleted after Telegram upload: %s", filepath)
+        except OSError as exc:
+            logger.error("Failed to delete file after Telegram upload: %s", exc)
+    else:
+        # Both Kinescope and Telegram failed
+        logger.error("Telegram fallback also failed for %s, keeping file locally", filepath)
+        send_telegram(
+            f"⚠️ Не удалось загрузить ни в Kinescope, ни в Telegram: {title}\n"
+            f"Файл сохранён локально: {filepath}",
+            config,
+        )
+        retry_state.pop(filepath, None)
+
+
+def _delete_error_messages(msg_ids: list, config: dict) -> None:
+    """Delete previously sent error messages from Telegram."""
+    for msg_id in msg_ids:
+        try:
+            delete_telegram_message(msg_id, config)
+        except Exception:
+            logger.warning("Failed to delete error message %s", msg_id)
 
 
 def enqueue_pending_files(config: dict) -> None:
@@ -212,7 +309,7 @@ def enqueue_upload(filepath: str) -> None:
     logger.info("File queued for upload: %s", filepath)
 
 
-def main(stop_event: threading.Event = None) -> None:
+def main(stop_event: threading.Event = None, pause_event: threading.Event = None) -> None:
     config_path = Path(__file__).parent.parent / "config.yaml"
     config = load_config(str(config_path))
 
@@ -222,7 +319,7 @@ def main(stop_event: threading.Event = None) -> None:
     # Start single upload worker thread (sequential uploads)
     worker = threading.Thread(
         target=upload_worker,
-        args=(config, stop_event),
+        args=(config, stop_event, pause_event),
         daemon=True,
     )
     worker.start()
@@ -232,6 +329,10 @@ def main(stop_event: threading.Event = None) -> None:
 
     while not (stop_event and stop_event.is_set()):
         try:
+            # Check pause
+            if pause_event and not wait_while_paused(pause_event, stop_event, config):
+                break
+
             # Disk space check
             if not check_disk_space(config):
                 logger.info("Disk space low, running cleanup")

@@ -40,6 +40,30 @@
 - [ ] Деплой + проверка пользователем
 - [ ] Коммит в git
 
+---
+
+## Batch 5: Ремукс вместо транскодирования + устранение пропусков
+- [x] `src/recorder.py` — заменить FFmpeg транскодирование на ремукс (`-c copy`)
+- [x] `src/recorder.py` — обновить логирование: "Remuxing" вместо "Transcoding", timeout 60s
+- [x] `config.yaml` — удалить `target_bitrate`
+- [x] `config.example.yaml` — удалить `target_bitrate`
+- [ ] Проверка пользователем + коммит
+
+## Batch 6: Telegram-фоллбэк при ошибке загрузки
+- [x] `src/notifier.py` — добавить `get_api_base_url()`, обновить все функции
+- [x] `src/notifier.py` — добавить `send_video_to_telegram()`, `delete_telegram_message()`
+- [x] `src/notifier.py` — send_telegram/send_telegram_plain возвращают message_id
+- [x] `config.yaml` / `config.example.yaml` — добавить `api_base_url`
+- [x] `src/main.py` — retry counter, Telegram fallback в upload_worker
+- [ ] Проверка пользователем + коммит
+
+## Batch 7: Кнопка "Пауза" в трее
+- [x] `src/tray.py` — добавить pause_event, динамическое меню, иконка паузы
+- [x] `src/main.py` — принять pause_event, wait_while_paused
+- [ ] Проверка пользователем + коммит
+
+---
+
 ## Оптимизация
 - [ ] Переключить на субпоток камеры (~100 МБ/час вместо 612 МБ)
 
