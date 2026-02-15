@@ -44,6 +44,10 @@ _upload_queue = queue.Queue()
 _uploading_files = set()
 _uploading_lock = threading.Lock()
 
+# Track all files sitting in the upload queue — cleanup must skip these too
+_queued_files = set()
+_queued_lock = threading.Lock()
+
 
 def check_disk_space(config: dict, min_free_gb: float = 2.0) -> bool:
     output_dir = Path(config["recording"]["output_dir"])
@@ -138,10 +142,16 @@ def wait_while_paused(pause_event: threading.Event, stop_event: threading.Event,
     return True
 
 
-def _get_uploading_files() -> set:
-    """Return set of file paths currently being uploaded."""
+def _get_protected_files() -> set:
+    """Return set of file paths that must not be deleted by cleanup.
+
+    Includes files currently being uploaded AND files waiting in the upload queue.
+    """
     with _uploading_lock:
-        return set(_uploading_files)
+        uploading = set(_uploading_files)
+    with _queued_lock:
+        queued = set(_queued_files)
+    return uploading | queued
 
 
 def upload_worker(config: dict, stop_event: threading.Event = None, pause_event: threading.Event = None) -> None:
@@ -167,6 +177,10 @@ def upload_worker(config: dict, stop_event: threading.Event = None, pause_event:
         except queue.Empty:
             continue
 
+        # File is now dequeued — remove from queued set (it moves to uploading set next)
+        with _queued_lock:
+            _queued_files.discard(filepath)
+
         # Verify file still exists
         if not Path(filepath).exists():
             logger.warning("File no longer exists, skipping: %s", filepath)
@@ -186,18 +200,24 @@ def upload_worker(config: dict, stop_event: threading.Event = None, pause_event:
         try:
             # Check pause before upload
             if pause_event and not wait_while_paused(pause_event, stop_event, config):
+                with _queued_lock:
+                    _queued_files.add(filepath)
                 _upload_queue.put(filepath)
                 requeued = True
                 break
 
             # 1. Wait for internet connectivity
             if not wait_for_internet(stop_event):
+                with _queued_lock:
+                    _queued_files.add(filepath)
                 _upload_queue.put(filepath)
                 requeued = True
                 break
 
             # 2. Wait for free network (no extra devices on 4G)
             if not wait_for_free_network(config, stop_event):
+                with _queued_lock:
+                    _queued_files.add(filepath)
                 _upload_queue.put(filepath)
                 requeued = True
                 break
@@ -232,6 +252,8 @@ def upload_worker(config: dict, stop_event: threading.Event = None, pause_event:
                 error_msg_id = notify_error("загрузка", error_details, config)
                 if error_msg_id:
                     retry_state[filepath]["error_msg_ids"].append(error_msg_id)
+                with _queued_lock:
+                    _queued_files.add(filepath)
                 _upload_queue.put(filepath)
                 requeued = True
                 # Wait 60s before retry
@@ -248,7 +270,7 @@ def upload_worker(config: dict, stop_event: threading.Event = None, pause_event:
 
         # Cleanup old recordings, skip files being uploaded
         try:
-            skip = _get_uploading_files()
+            skip = _get_protected_files()
             cleanup_old_recordings(config, skip_files=skip)
         except Exception:
             logger.error("Cleanup failed: %s", traceback.format_exc())
@@ -307,11 +329,16 @@ def enqueue_pending_files(config: dict) -> None:
     send_telegram(f"📤 Найдено {len(pending)} незагруженных файлов, начинаю загрузку", config)
 
     for mp4_file in pending:
-        _upload_queue.put(str(mp4_file))
+        filepath = str(mp4_file)
+        with _queued_lock:
+            _queued_files.add(filepath)
+        _upload_queue.put(filepath)
 
 
 def enqueue_upload(filepath: str) -> None:
     """Add a file to the upload queue."""
+    with _queued_lock:
+        _queued_files.add(filepath)
     _upload_queue.put(filepath)
     logger.info("File queued for upload: %s", filepath)
 
@@ -343,7 +370,7 @@ def main(stop_event: threading.Event = None, pause_event: threading.Event = None
             # Disk space check
             if not check_disk_space(config):
                 logger.info("Disk space low, running cleanup")
-                skip = _get_uploading_files()
+                skip = _get_protected_files()
                 cleanup_old_recordings(config, skip_files=skip)
                 if not check_disk_space(config):
                     logger.error("Disk space still insufficient, waiting 60s")
