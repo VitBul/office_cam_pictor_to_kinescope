@@ -27,6 +27,52 @@ def load_config(config_path: str) -> dict:
     return config
 
 
+def remux_ts_to_mp4(ts_path: str, config: dict) -> str | None:
+    """Remux .ts → .mp4 (stream copy, no re-encoding).
+
+    Args:
+        ts_path: Path to the .ts file.
+        config: Application config dict (for ffmpeg path).
+
+    Returns:
+        Full path to the created .mp4 file on success, or None on failure.
+    """
+    ts_file = Path(ts_path)
+    mp4_path = ts_file.with_suffix(".mp4")
+    ffmpeg_path = config.get("ffmpeg", {}).get("path", "ffmpeg")
+
+    remux_cmd = [
+        ffmpeg_path, "-y",
+        "-i", str(ts_file),
+        "-c", "copy",
+        "-an",
+        "-movflags", "+faststart",
+        str(mp4_path),
+    ]
+
+    logger.info("Remuxing to MP4: %s → %s", ts_file.name, mp4_path.name)
+
+    remux_timeout = 60  # remux is near-instant
+
+    try:
+        result = subprocess.run(remux_cmd, capture_output=True, text=True, timeout=remux_timeout)
+    except subprocess.TimeoutExpired:
+        logger.error("Remux timed out after %ds", remux_timeout)
+        return None
+
+    if result.returncode != 0:
+        logger.error("Remux failed (exit code %d): %s", result.returncode,
+                      result.stderr[-500:] if result.stderr else "no stderr")
+        return None
+
+    # Remove .ts after successful remux
+    ts_file.unlink()
+    mp4_size_mb = mp4_path.stat().st_size / (1024 * 1024)
+    logger.info("Remux complete: %s (%.1f MB)", mp4_path, mp4_size_mb)
+
+    return str(mp4_path)
+
+
 def record_segment(config: dict, duration_override: int = None) -> str:
     """Record a video segment: VLC captures RTSP to .ts, FFmpeg remuxes to .mp4.
 
@@ -37,14 +83,12 @@ def record_segment(config: dict, duration_override: int = None) -> str:
     duration = duration_override or config["recording"]["duration_seconds"]
     output_dir = Path(config["recording"]["output_dir"])
     vlc_path = config.get("vlc", {}).get("path", "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe")
-    ffmpeg_path = config.get("ffmpeg", {}).get("path", "ffmpeg")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     now = datetime.now()
     base_name = now.strftime("%d.%m.%Y %H_%M")
     ts_path = output_dir / (base_name + ".ts")
-    mp4_path = output_dir / (base_name + ".mp4")
 
     # Step 1: VLC captures RTSP → .ts
     vlc_cmd = [
@@ -89,37 +133,9 @@ def record_segment(config: dict, duration_override: int = None) -> str:
     ts_size_mb = ts_path.stat().st_size / (1024 * 1024)
     logger.info("VLC recording saved: %s (%.1f MB)", ts_path, ts_size_mb)
 
-    # Step 2: FFmpeg remuxes .ts → .mp4 (stream copy, no re-encoding)
-    remux_cmd = [
-        ffmpeg_path, "-y",
-        "-i", str(ts_path),
-        "-c", "copy",
-        "-an",
-        "-movflags", "+faststart",
-        str(mp4_path),
-    ]
-
-    logger.info("Remuxing to MP4: %s → %s", ts_path.name, mp4_path.name)
-
-    remux_timeout = 60  # remux is near-instant
-
-    try:
-        result = subprocess.run(remux_cmd, capture_output=True, text=True, timeout=remux_timeout)
-    except subprocess.TimeoutExpired:
-        logger.error("Remux timed out after %ds", remux_timeout)
-        return str(ts_path)
-
-    if result.returncode != 0:
-        logger.error("Remux failed (exit code %d): %s", result.returncode,
-                      result.stderr[-500:] if result.stderr else "no stderr")
-        return str(ts_path)
-
-    # Remove .ts after successful remux
-    ts_path.unlink()
-    mp4_size_mb = mp4_path.stat().st_size / (1024 * 1024)
-    logger.info("Remux complete: %s (%.1f MB)", mp4_path, mp4_size_mb)
-
-    return str(mp4_path)
+    # Step 2: Remux .ts → .mp4
+    mp4_result = remux_ts_to_mp4(str(ts_path), config)
+    return mp4_result if mp4_result else str(ts_path)
 
 
 def get_kinescope_title(filepath: str) -> str:

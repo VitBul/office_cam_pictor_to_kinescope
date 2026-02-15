@@ -21,7 +21,7 @@ from pathlib import Path
 
 import requests
 
-from recorder import load_config, record_segment, get_kinescope_title, cleanup_old_recordings
+from recorder import load_config, record_segment, get_kinescope_title, cleanup_old_recordings, remux_ts_to_mp4
 from uploader import upload_to_kinescope
 from network_monitor import check_extra_devices
 from notifier import (
@@ -33,6 +33,7 @@ from notifier import (
     send_video_to_telegram,
     delete_telegram_message,
 )
+from bot_commands import start_command_listener
 from logger_setup import setup_logger
 
 logger = setup_logger("main")
@@ -316,17 +317,38 @@ def _delete_error_messages(msg_ids: list, config: dict) -> None:
 
 
 def enqueue_pending_files(config: dict) -> None:
-    """Find and queue any .mp4 files left from previous sessions."""
+    """Find and queue any .mp4 and .ts files left from previous sessions.
+
+    .ts files are remuxed to .mp4 before queueing.
+    """
     output_dir = Path(config["recording"]["output_dir"])
     if not output_dir.exists():
         return
 
-    pending = sorted(output_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime)
+    mp4_files = list(output_dir.glob("*.mp4"))
+    ts_files = list(output_dir.glob("*.ts"))
+
+    if not mp4_files and not ts_files:
+        return
+
+    total_found = len(mp4_files) + len(ts_files)
+    logger.info("Found %d pending file(s): %d .mp4, %d .ts", total_found, len(mp4_files), len(ts_files))
+
+    # Remux .ts files to .mp4
+    for ts_file in ts_files:
+        logger.info("Remuxing pending .ts file: %s", ts_file)
+        mp4_path = remux_ts_to_mp4(str(ts_file), config)
+        if mp4_path:
+            mp4_files.append(Path(mp4_path))
+        else:
+            logger.error("Failed to remux %s, skipping", ts_file)
+
+    # Sort all .mp4 files by modification time and enqueue
+    pending = sorted(mp4_files, key=lambda p: p.stat().st_mtime)
     if not pending:
         return
 
-    logger.info("Found %d pending file(s) to upload", len(pending))
-    send_telegram(f"📤 Найдено {len(pending)} незагруженных файлов, начинаю загрузку", config)
+    send_telegram(f"\U0001f4e4 Найдено {total_found} незагруженных файлов, начинаю загрузку", config)
 
     for mp4_file in pending:
         filepath = str(mp4_file)
@@ -357,6 +379,16 @@ def main(stop_event: threading.Event = None, pause_event: threading.Event = None
         daemon=True,
     )
     worker.start()
+
+    # Start Telegram command listener (handles /stream, /stopstream, /status)
+    if config.get("streaming"):
+        cmd_listener = threading.Thread(
+            target=start_command_listener,
+            args=(config, stop_event or threading.Event(), _upload_queue),
+            daemon=True,
+        )
+        cmd_listener.start()
+        logger.info("Command listener thread started")
 
     # Queue leftover files from previous sessions
     enqueue_pending_files(config)

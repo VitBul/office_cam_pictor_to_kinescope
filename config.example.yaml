@@ -28,6 +28,12 @@ network:
   subnet_prefix: "10.0.0"
   check_interval_seconds: 300  # Check every 5 min when paused
 
+streaming:
+  rtmp_url: "rtmp://rtmp.kinescope.io/live"
+  stream_key: "YOUR_STREAM_KEY"
+  play_link: "https://kinescope.io/YOUR_PLAY_LINK"
+  event_id: "YOUR_EVENT_ID"
+
 vlc:
   path: "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe"
 

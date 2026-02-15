@@ -64,6 +64,22 @@
 
 ---
 
+## Batch 8: Live Streaming + Pending .ts Bug Fix
+
+### Батч 8.1: Исправление бага pending .ts файлов
+- [x] 8.1.1 Выделить `remux_ts_to_mp4()` в recorder.py
+- [x] 8.1.2 Обновить `enqueue_pending_files()` в main.py — искать .ts + .mp4
+
+### Батч 8.2: Живая трансляция через Kinescope
+- [x] 8.2.1 Создать `src/streamer.py` — VLC RTSP → RTMP
+- [x] 8.2.2 Добавить `pin_message()` / `unpin_message()` в notifier.py
+- [x] 8.2.3 Создать `src/bot_commands.py` — Telegram long polling
+- [x] 8.2.4 Интеграция command listener в main.py
+- [x] 8.2.5 Обновить config.yaml и config.example.yaml
+- [ ] Проверка пользователем + коммит
+
+---
+
 ## Оптимизация
 - [ ] Переключить на субпоток камеры (~100 МБ/час вместо 612 МБ)
 

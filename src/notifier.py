@@ -185,6 +185,80 @@ def delete_telegram_message(message_id: int, config: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Pin / Unpin messages
+# ---------------------------------------------------------------------------
+
+def pin_message(message_id: int, config: dict) -> bool:
+    """Pin a message in the Telegram chat.
+
+    Args:
+        message_id: ID of the message to pin.
+        config: Application config dict.
+
+    Returns:
+        True if pinned, False otherwise.
+    """
+    bot_token = config["telegram"]["bot_token"]
+    chat_id = config["telegram"]["chat_id"]
+    base = get_api_base_url(config)
+    url = f"{base}/bot{bot_token}/pinChatMessage"
+
+    try:
+        response = requests.post(
+            url,
+            json={"chat_id": chat_id, "message_id": message_id, "disable_notification": True},
+            timeout=30,
+        )
+        if response.ok:
+            logger.info("Message pinned: %s", message_id)
+            return True
+        logger.error(
+            "Telegram pinChatMessage failed (status %s): %s",
+            response.status_code,
+            response.text,
+        )
+        return False
+    except requests.RequestException as exc:
+        logger.error("Failed to pin message: %s", exc)
+        return False
+
+
+def unpin_message(message_id: int, config: dict) -> bool:
+    """Unpin a message in the Telegram chat.
+
+    Args:
+        message_id: ID of the message to unpin.
+        config: Application config dict.
+
+    Returns:
+        True if unpinned, False otherwise.
+    """
+    bot_token = config["telegram"]["bot_token"]
+    chat_id = config["telegram"]["chat_id"]
+    base = get_api_base_url(config)
+    url = f"{base}/bot{bot_token}/unpinChatMessage"
+
+    try:
+        response = requests.post(
+            url,
+            json={"chat_id": chat_id, "message_id": message_id},
+            timeout=30,
+        )
+        if response.ok:
+            logger.info("Message unpinned: %s", message_id)
+            return True
+        logger.error(
+            "Telegram unpinChatMessage failed (status %s): %s",
+            response.status_code,
+            response.text,
+        )
+        return False
+    except requests.RequestException as exc:
+        logger.error("Failed to unpin message: %s", exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Convenience notification helpers
 # ---------------------------------------------------------------------------
 
